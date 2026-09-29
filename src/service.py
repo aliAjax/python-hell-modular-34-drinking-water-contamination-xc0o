@@ -1,4 +1,4 @@
-from . import domain, rules
+from . import dispatch, domain, rules
 from .domain import DomainError
 
 
@@ -60,6 +60,8 @@ class Service:
         item["sources"] = self.repository.list_sources(item_id)
         item["audit"] = self.repository.audit_trail(item_id)
         item["assessment"] = rules.assess(item["payload"])
+        item["dispatch"] = self.repository.item_dispatch(item_id)
+        item["legacy_alternate_source_id"] = item["payload"].get("alternate_source_id")
         return item
 
     def list_items(self, status=None):
@@ -67,3 +69,48 @@ class Service:
 
     def state(self):
         return self.repository.state_summary()
+
+    def _require_identity(self, actor, role):
+        if not actor or not role:
+            raise DomainError("identity_required", "需要用户身份和角色", 401)
+
+    def create_backup_source(self, payload, actor, role):
+        self._require_identity(actor, role)
+        if role not in dispatch.BACKUP_SOURCE_ROLES:
+            raise DomainError("forbidden", "当前角色不能登记备用水源", 403)
+        normalized = dispatch.normalize_backup_source(payload)
+        return self.repository.create_backup_source(
+            normalized["source_code"], normalized["name"], normalized["capacity"], actor, role
+        )
+
+    def backup_sources(self):
+        return self.repository.list_backup_sources()
+
+    def create_dispatch(self, item_id, payload, actor, role):
+        self._require_identity(actor, role)
+        if role not in dispatch.DISPATCH_CREATE_ROLES:
+            raise DomainError("forbidden", "当前角色不能提交调度单", 403)
+        item = self.repository.get_item(item_id)
+        if item["status"] in dispatch.ITEM_CLOSED_STATUS:
+            raise DomainError("invalid_state", "事件已关闭，不能申请备用水源调度", 409)
+        normalized = dispatch.normalize_order(payload)
+        return self.repository.create_dispatch_order(
+            item_id,
+            normalized["source_code"],
+            normalized["requests"],
+            normalized["request_id"],
+            normalized["note"],
+            actor,
+            role,
+        )
+
+    def dispatch_action(self, order_id, action, payload, actor, role, expected_version=None):
+        self._require_identity(actor, role)
+        if action not in dispatch.DISPATCH_ACTION_ROLES:
+            raise DomainError("unknown_action", "不支持的调度操作")
+        if role not in dispatch.DISPATCH_ACTION_ROLES[action]:
+            raise DomainError("forbidden", "当前角色不能执行该调度操作", 403)
+        return self.repository.apply_dispatch_action(order_id, action, actor, role, payload, expected_version)
+
+    def dispatch_summary(self):
+        return self.repository.dispatch_summary()

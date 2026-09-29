@@ -1,5 +1,140 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>饮用水污染响应</title><body><h1>市政饮用水污染响应</h1><p>使用 JSON API 创建污染事件、登记水源或管网记录，并完成复检、通知、冲洗、消毒和恢复。</p><pre>GET /health
-GET /api/state
-POST /api/items
-POST /api/items/{id}/sources
-POST /api/items/{id}/actions</pre></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>饮用水污染响应 · 备用水源调度</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; background: #f4f6f8; color: #222; }
+  header { background: #134e6f; color: #fff; padding: 14px 24px; display: flex; align-items: baseline; gap: 16px; }
+  header h1 { font-size: 18px; margin: 0; }
+  header span { font-size: 12px; opacity: .8; }
+  main { max-width: 1080px; margin: 20px auto; padding: 0 16px; }
+  section { background: #fff; border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  h2 { font-size: 15px; margin: 0 0 12px; color: #134e6f; }
+  h3 { font-size: 13px; margin: 14px 0 6px; color: #555; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #e3e8ec; padding: 6px 10px; text-align: left; }
+  th { background: #f0f4f7; font-weight: 600; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: #e8eef2; }
+  .tag.pending { background: #fff3cd; } .tag.delivered { background: #d4edda; }
+  .tag.failed { background: #f8d7da; } .tag.released { background: #e2e3e5; }
+  .tag.open { background: #fff3cd; } .tag.done { background: #d4edda; } .tag.cancelled { background: #e2e3e5; }
+  .muted { color: #888; font-size: 12px; }
+  .notice { background: #eef6fb; border-left: 3px solid #134e6f; padding: 6px 10px; margin: 4px 0; font-size: 13px; }
+  .legacy { background: #fdf3e3; border-left: 3px solid #c98a1b; padding: 6px 10px; margin: 4px 0; font-size: 13px; }
+  .empty { color: #999; font-size: 13px; }
+  #refresh { margin-left: auto; background: #fff; color: #134e6f; border: 0; border-radius: 4px; padding: 4px 14px; cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>市政饮用水污染响应 · 备用水源调度</h1>
+  <span id="updated"></span>
+  <button id="refresh" type="button">刷新</button>
+</header>
+<main>
+  <section>
+    <h2>备用水源剩余水量</h2>
+    <div id="sources"></div>
+  </section>
+  <section>
+    <h2>污染事件调度情况</h2>
+    <div id="events"></div>
+  </section>
+</main>
+<script>
+var KIND_LABELS = {reserve: "预留", deliver: "送达", refund: "退回", release: "释放", redeliver: "补送", recheck: "复检"};
+var STATUS_LABELS = {pending: "待送水", delivered: "已送达", failed: "失败退回", released: "已释放",
+  reserved: "已预留", partial: "部分执行", completed: "已完成", revoked: "已撤销",
+  open: "待补送", done: "已补送", cancelled: "已取消"};
+
+function esc(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
+    return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[ch];
+  });
+}
+function tag(status) {
+  return '<span class="tag ' + esc(status) + '">' + esc(STATUS_LABELS[status] || status) + "</span>";
+}
+function fmtTime(value) {
+  return value ? esc(String(value).replace("T", " ").slice(0, 19)) : "";
+}
+
+function renderSources(sources) {
+  if (!sources.length) return '<p class="empty">尚未登记备用水源。</p>';
+  var rows = sources.map(function (s) {
+    return "<tr><td>" + esc(s.source_code) + "</td><td>" + esc(s.name) + "</td><td>" + s.capacity +
+      "</td><td>" + s.held + "</td><td><b>" + s.remaining + "</b></td></tr>";
+  }).join("");
+  return "<table><tr><th>编号</th><th>名称</th><th>总水量</th><th>已预留/送达</th><th>剩余水量</th></tr>" + rows + "</table>";
+}
+
+function renderCoverage(coverage) {
+  if (!coverage.length) return '<p class="empty">暂无调度单。</p>';
+  var rows = coverage.map(function (c) {
+    return "<tr><td>#" + c.order_id + "</td><td>" + esc(c.source_code) + "</td><td>" + esc(c.zone_id) +
+      "</td><td>" + c.requested + "</td><td>" + c.reserved + "</td><td>" + c.delivered + "</td><td>" +
+      tag(c.status) + "</td></tr>";
+  }).join("");
+  return "<table><tr><th>调度单</th><th>水源</th><th>片区</th><th>请求水量</th><th>预留水量</th><th>已送达</th><th>状态</th></tr>" + rows + "</table>";
+}
+
+function renderTodos(todos) {
+  if (!todos.length) return '<p class="empty">无补送待办。</p>';
+  var rows = todos.map(function (t) {
+    return "<tr><td>#" + t.id + "</td><td>#" + t.order_id + "</td><td>" + esc(t.zone_id) + "</td><td>" +
+      t.amount + "</td><td>" + tag(t.status) + "</td></tr>";
+  }).join("");
+  return "<table><tr><th>待办</th><th>调度单</th><th>片区</th><th>补送水量</th><th>状态</th></tr>" + rows + "</table>";
+}
+
+function renderLedger(ledger) {
+  if (!ledger.length) return '<p class="empty">暂无退补记录。</p>';
+  var rows = ledger.map(function (entry) {
+    return "<tr><td>" + fmtTime(entry.created_at) + "</td><td>" + esc(KIND_LABELS[entry.kind] || entry.kind) +
+      "</td><td>" + esc(entry.zone_id || "—") + "</td><td>" + entry.amount + "</td><td>" + esc(entry.detail) +
+      "</td><td>" + esc(entry.actor || "") + "</td></tr>";
+  }).join("");
+  return "<table><tr><th>时间</th><th>类型</th><th>片区</th><th>水量</th><th>说明</th><th>操作人</th></tr>" + rows + "</table>";
+}
+
+function renderEvent(ev) {
+  var html = '<section><h2>事件 #' + ev.item_id + " · " + esc(ev.contaminant) +
+    ' <span class="tag">' + esc(ev.status) + "</span></h2>" +
+    '<p class="muted">污染水源 ' + esc(ev.source_id) + " · 受影响片区 " + esc((ev.zone_ids || []).join("、")) + "</p>";
+  if (ev.legacy_alternate_source_id) {
+    html += '<div class="legacy">旧版备用水源（升级前记录）：' + esc(ev.legacy_alternate_source_id) + "</div>";
+  }
+  html += "<h3>通知</h3>";
+  if (ev.notifications && ev.notifications.length) {
+    html += ev.notifications.map(function (n) {
+      return '<div class="notice">[' + esc(n.kind) + "] " + esc(n.message) + ' <span class="muted">(' + esc(n.notice_id) + ")</span></div>";
+    }).join("");
+  } else {
+    html += '<p class="empty">暂无通知。</p>';
+  }
+  html += "<h3>片区覆盖</h3>" + renderCoverage(ev.coverage);
+  html += "<h3>补送待办</h3>" + renderTodos(ev.todos);
+  html += "<h3>退补记录</h3>" + renderLedger(ev.ledger);
+  return html + "</section>";
+}
+
+function load() {
+  fetch("/api/dispatch/summary").then(function (resp) { return resp.json(); }).then(function (data) {
+    document.getElementById("sources").innerHTML = renderSources(data.sources || []);
+    var events = data.events || [];
+    document.getElementById("events").innerHTML = events.length
+      ? events.map(renderEvent).join("")
+      : '<p class="empty">暂无污染事件。</p>';
+    document.getElementById("updated").textContent = "更新于 " + new Date().toLocaleTimeString();
+  }).catch(function (err) {
+    document.getElementById("updated").textContent = "加载失败：" + err;
+  });
+}
+document.getElementById("refresh").addEventListener("click", load);
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>

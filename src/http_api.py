@@ -52,12 +52,19 @@ def build_handler(service, static_dir):
                     return self._send(200, service.state())
                 if path == "/api/items":
                     return self._send(200, {"items": service.list_items()})
+                if path == "/api/backup-sources":
+                    return self._send(200, {"sources": service.backup_sources()})
+                if path == "/api/dispatch/summary":
+                    return self._send(200, service.dispatch_summary())
                 parts = [part for part in path.split("/") if part]
                 if len(parts) == 3 and parts[:2] == ["api", "items"]:
                     return self._send(200, service.get_item(int(parts[2])))
                 if len(parts) == 4 and parts[:2] == ["api", "items"] and parts[3] == "audit":
                     item = service.get_item(int(parts[2]))
                     return self._send(200, {"events": item["audit"]})
+                if len(parts) == 4 and parts[:2] == ["api", "items"] and parts[3] == "dispatch":
+                    item = service.get_item(int(parts[2]))
+                    return self._send(200, item["dispatch"])
                 if path == "/":
                     file_path = os.path.join(static_dir, "index.html")
                     with open(file_path, "rb") as handle:
@@ -78,8 +85,18 @@ def build_handler(service, static_dir):
                 parts = [part for part in path.split("/") if part]
                 if parts == ["api", "items"]:
                     return self._send(201, service.create_item(payload, actor, role, region))
+                if parts == ["api", "backup-sources"]:
+                    return self._send(201, service.create_backup_source(payload, actor, role))
                 if len(parts) == 4 and parts[:2] == ["api", "items"] and parts[3] == "sources":
                     return self._send(201, service.add_source(int(parts[2]), payload, actor, role, region))
+                if len(parts) == 4 and parts[:2] == ["api", "items"] and parts[3] == "dispatch":
+                    return self._send(201, service.create_dispatch(int(parts[2]), payload, actor, role))
+                if len(parts) == 4 and parts[:2] == ["api", "dispatch"] and parts[3] == "actions":
+                    action = payload.pop("action", "")
+                    if not action:
+                        raise DomainError("action_required", "缺少 action", 400)
+                    expected = payload.pop("expected_version", None)
+                    return self._send(200, service.dispatch_action(int(parts[2]), action, payload, actor, role, expected))
                 if len(parts) == 4 and parts[:2] == ["api", "items"] and parts[3] == "actions":
                     action = payload.pop("action", "")
                     if not action:

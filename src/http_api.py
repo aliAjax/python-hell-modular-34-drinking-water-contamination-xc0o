@@ -52,6 +52,8 @@ def build_handler(service, static_dir):
                     return self._send(200, service.state())
                 if path == "/api/items":
                     return self._send(200, {"items": service.list_items()})
+                if path == "/api/backup-sources":
+                    return self._send(200, {"backup_sources": service.list_backup_sources()})
                 parts = [part for part in path.split("/") if part]
                 if len(parts) == 3 and parts[:2] == ["api", "items"]:
                     return self._send(200, service.get_item(int(parts[2])))
@@ -76,6 +78,8 @@ def build_handler(service, static_dir):
                 path = urlparse(self.path).path
                 payload = self._json_body()
                 parts = [part for part in path.split("/") if part]
+                if parts == ["api", "backup-sources"]:
+                    return self._send(201, service.register_backup_source(payload, actor, role))
                 if parts == ["api", "items"]:
                     return self._send(201, service.create_item(payload, actor, role, region))
                 if len(parts) == 4 and parts[:2] == ["api", "items"] and parts[3] == "sources":

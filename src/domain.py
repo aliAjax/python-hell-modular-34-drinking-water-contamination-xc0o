@@ -91,3 +91,40 @@ def normalize_source(payload):
         "note": payload.get("note", ""),
     }
     return result
+
+
+def normalize_backup_source(payload):
+    source_id = require_text(payload, "source_id")
+    name = payload.get("name", "")
+    if not isinstance(name, str):
+        raise DomainError("invalid_name", "备用水源名称必须是字符串")
+    return {
+        "source_id": source_id,
+        "name": name.strip(),
+        "capacity_volume": number(payload, "capacity_volume", 0.000001),
+    }
+
+
+def normalize_dispatch(payload):
+    source_id = require_text(payload, "source_id")
+    raw_zones = payload.get("zones")
+    if not isinstance(raw_zones, list) or not raw_zones:
+        raise DomainError("zones_required", "调度单至少需要一个送水片区")
+    zones = []
+    seen = set()
+    for raw in raw_zones:
+        if not isinstance(raw, dict):
+            raise DomainError("invalid_zone", "片区申请必须是对象列表")
+        zone_id = require_text(raw, "zone_id")
+        if zone_id in seen:
+            raise DomainError("duplicate_zone", "同一调度单不能重复申请同一片区")
+        seen.add(zone_id)
+        zones.append({
+            "zone_id": zone_id,
+            "requested_volume": number(raw, "requested_volume", 0.000001),
+        })
+    order_id = payload.get("order_id", "")
+    if order_id is not None and not isinstance(order_id, str):
+        raise DomainError("invalid_order_id", "调度单编号必须是字符串")
+    order_id = order_id.strip() if order_id else ""
+    return {"source_id": source_id, "order_id": order_id, "zones": zones}

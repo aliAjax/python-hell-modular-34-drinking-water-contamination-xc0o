@@ -37,6 +37,37 @@ class Service:
         )
         return result
 
+    def register_backup_source(self, payload, actor, role):
+        if not actor or not role:
+            raise DomainError("identity_required", "需要用户身份和角色", 401)
+        if role not in rules.BACKUP_SOURCE_ROLES:
+            raise DomainError("forbidden", "当前角色不能登记备用水源", 403)
+        normalized = domain.normalize_backup_source(payload)
+        return self.repository.register_backup_source(
+            normalized["source_id"], normalized["name"], normalized["capacity_volume"], actor, role
+        )
+
+    def list_backup_sources(self):
+        sources = self.repository.list_backup_sources()
+        used = {source["source_id"]: 0.0 for source in sources}
+        for item in self.repository.list_items():
+            water = item["payload"].get("water_supply") or {}
+            for order in water.get("orders", []):
+                source_id = order.get("source_id")
+                if source_id not in used:
+                    continue
+                for line in order.get("lines", []):
+                    used[source_id] += float(line.get("delivered_volume", 0))
+                    if line.get("status") in {"reserved", "partial", "partially_delivered"}:
+                        used[source_id] += float(line.get("reserved_volume", 0)) - float(line.get("delivered_volume", 0))
+        result = []
+        for source in sources:
+            value = dict(source)
+            value["used_volume"] = round(used.get(source["source_id"], 0.0), 6)
+            value["available_volume"] = round(float(source["capacity_volume"]) - value["used_volume"], 6)
+            result.append(value)
+        return result
+
     def act(self, item_id, action, payload, actor, role, expected_version=None, region=None):
         if not actor or not role:
             raise DomainError("identity_required", "需要用户身份和角色", 401)
@@ -49,6 +80,13 @@ class Service:
                 raise DomainError("region_mismatch", "不能处理其他区域的记录", 403)
         if action in rules.ACTION_REQUIRES_VERSION and expected_version is None:
             raise DomainError("expected_version_required", "该操作需要 expected_version", 400)
+        if action == "submit_dispatch":
+            normalized = domain.normalize_dispatch(payload)
+            return self.repository.source_dispatch_action(item_id, action, normalized, actor, role, expected_version)
+        if action == "redeliver":
+            if not isinstance(payload, dict):
+                payload = {}
+            return self.repository.source_dispatch_action(item_id, action, payload, actor, role, expected_version)
         new_status, new_payload, event_payload = rules.apply_action(item, action, payload, actor, role)
         self.repository.apply_action(
             item_id, action, actor, role, new_status, new_payload, event_payload, expected_version
@@ -60,10 +98,17 @@ class Service:
         item["sources"] = self.repository.list_sources(item_id)
         item["audit"] = self.repository.audit_trail(item_id)
         item["assessment"] = rules.assess(item["payload"])
+        source_map = {source["source_id"]: source for source in self.repository.list_backup_sources()}
+        item["water"] = rules.water_view(item["payload"], source_map)
         return item
 
     def list_items(self, status=None):
-        return self.repository.list_items(status)
+        return [self.get_item(item["id"]) for item in self.repository.list_items(status)]
 
     def state(self):
-        return self.repository.state_summary()
+        counts = self.repository.state_summary()["counts"]
+        return {
+            "counts": counts,
+            "items": self.list_items(),
+            "backup_sources": self.list_backup_sources(),
+        }

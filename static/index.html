@@ -1,5 +1,99 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>饮用水污染响应</title><body><h1>市政饮用水污染响应</h1><p>使用 JSON API 创建污染事件、登记水源或管网记录，并完成复检、通知、冲洗、消毒和恢复。</p><pre>GET /health
-GET /api/state
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>饮用水污染响应与备用水源调度</title>
+<style>
+body { font-family: system-ui, -apple-system, sans-serif; margin: 24px; color: #17202a; }
+section { margin-bottom: 28px; padding: 16px; border: 1px solid #d7dde3; border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+th, td { border: 1px solid #d7dde3; padding: 6px 8px; text-align: left; vertical-align: top; }
+th { background: #f2f5f7; }
+pre { white-space: pre-wrap; background: #f7f7f7; padding: 8px; border-radius: 4px; }
+.badge { display: inline-block; padding: 2px 6px; border-radius: 10px; background: #e8f1fb; }
+.muted { color: #667; }
+</style>
+</head>
+<body>
+<h1>市政饮用水污染响应与备用水源调度</h1>
+<p>页面汇总每个事件的片区覆盖、剩余水量、退补记录和通知；旧版单一备用水源字段仍可查看。</p>
+<pre>GET  /api/state
+POST /api/backup-sources
 POST /api/items
-POST /api/items/{id}/sources
-POST /api/items/{id}/actions</pre></body></html>
+POST /api/items/{id}/actions  # submit_dispatch / report_delivery / redeliver / cancel_dispatch ...</pre>
+<section>
+  <h2>备用水源</h2>
+  <div id="sources"></div>
+</section>
+<section>
+  <h2>污染事件</h2>
+  <div id="events"></div>
+</section>
+<script>
+function volume(value) {
+  if (value === null || value === undefined) return '—';
+  return Number(value).toFixed(3);
+}
+function rows(data, columns) {
+  if (!data.length) return '<p class="muted">暂无记录</p>';
+  return '<table><thead><tr>' + columns.map(c => '<th>' + c[0] + '</th>').join('') +
+    '</tr></thead><tbody>' + data.map(row => '<tr>' + columns.map(c => '<td>' + c[1](row) + '</td>').join('') + '</tr>').join('') +
+    '</tbody></table>';
+}
+function renderSources(sources) {
+  document.getElementById('sources').innerHTML = rows(sources, [
+    ['水源编号', s => s.source_id],
+    ['名称', s => s.name || '—'],
+    ['总容量', s => volume(s.capacity_volume)],
+    ['已预留/送达', s => volume(s.used_volume)],
+    ['剩余可用', s => volume(s.available_volume)],
+  ]);
+}
+function renderEvents(items) {
+  if (!items.length) {
+    document.getElementById('events').innerHTML = '<p class="muted">暂无事件</p>';
+    return;
+  }
+  document.getElementById('events').innerHTML = items.map(item => {
+    const water = item.water || {};
+    const zones = water.zones || [];
+    const returns = water.returns || [];
+    const todos = water.todos || [];
+    const notices = water.notifications || [];
+    return '<section><h3>事件 #' + item.id + ' <span class="badge">' + item.status + '</span></h3>' +
+      '<p>污染物：' + (item.payload.contaminant || '—') + '；原水源：' + (item.payload.source_id || '—') +
+      '；评估：' + ((item.assessment && item.assessment.level) || '—') + '</p>' +
+      '<h4>片区覆盖与剩余水量</h4>' + rows(zones, [
+        ['片区', z => z.zone_id],
+        ['状态', z => z.status],
+        ['申请量', z => volume(z.requested_volume)],
+        ['预留量', z => volume(z.reserved_volume)],
+        ['已送达', z => volume(z.delivered_volume)],
+        ['剩余未送达', z => volume(z.remaining_volume)],
+      ]) +
+      '<p>事件未送达预留合计：<strong>' + volume(water.remaining_volume) + '</strong>' +
+      (water.legacy ? '（旧版单一备用水源：' + water.alternate_source_id + '）' : '') + '</p>' +
+      '<h4>退回记录</h4>' + rows(returns, [
+        ['时间', r => r.created_at], ['类型', r => r.type], ['调度单', r => r.order_id],
+        ['片区', r => r.zone_id], ['退回水量', r => volume(r.volume)], ['原因', r => r.reason],
+      ]) +
+      '<h4>补送待办</h4>' + rows(todos, [
+        ['待办', t => t.todo_id], ['状态', t => t.status], ['调度单', t => t.order_id],
+        ['片区', t => t.zone_id], ['水量', t => volume(t.volume)], ['原因', t => t.reason],
+      ]) +
+      '<h4>通知</h4>' + rows(notices, [
+        ['编号', n => n.notice_id], ['类型', n => n.kind], ['内容', n => n.message],
+      ]) +
+      '<details><summary>调度单原始记录</summary><pre>' + JSON.stringify(water.orders || [], null, 2) + '</pre></details>' +
+      '</section>';
+  }).join('');
+}
+fetch('/api/state').then(response => response.json()).then(state => {
+  renderSources(state.backup_sources || []);
+  renderEvents(state.items || []);
+}).catch(error => {
+  document.getElementById('events').textContent = String(error);
+});
+</script>
+</body>
+</html>

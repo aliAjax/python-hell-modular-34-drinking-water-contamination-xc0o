@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from .audit import audit_hash, canonical_json
 from .domain import ConflictError, NotFoundError, DomainError
+from . import rules
 
 
 def now_iso():
@@ -48,6 +49,13 @@ class Repository:
                     created_at TEXT NOT NULL,
                     UNIQUE(item_id, source_type, external_id),
                     FOREIGN KEY(item_id) REFERENCES items(id)
+                );
+                CREATE TABLE IF NOT EXISTS backup_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    capacity_volume REAL NOT NULL,
+                    created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS actions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +215,115 @@ class Repository:
         finally:
             conn.close()
 
+    def register_backup_source(self, source_id, name, capacity_volume, actor, role):
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    "INSERT INTO backup_sources(source_id,name,capacity_volume,created_at) VALUES(?,?,?,?)",
+                    (source_id, name, capacity_volume, now_iso()),
+                )
+            except sqlite3.IntegrityError:
+                raise ConflictError("duplicate_backup_source", "备用水源已经登记")
+            self.append_audit(conn, None, "backup_source_registered", actor, role, {
+                "source_id": source_id,
+                "name": name,
+                "capacity_volume": capacity_volume,
+            })
+            conn.execute("COMMIT")
+            return self.get_backup_source(source_id)
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+
+    def get_backup_source(self, source_id):
+        conn = self.connect()
+        try:
+            row = conn.execute("SELECT * FROM backup_sources WHERE source_id=?", (source_id,)).fetchone()
+            if row is None:
+                return None
+            return dict(row)
+        finally:
+            conn.close()
+
+    def list_backup_sources(self):
+        conn = self.connect()
+        try:
+            return [dict(row) for row in conn.execute("SELECT * FROM backup_sources ORDER BY id").fetchall()]
+        finally:
+            conn.close()
+
+    def _global_available_volume(self, conn, source_id, source_capacity):
+        available = float(source_capacity)
+        rows = conn.execute("SELECT payload FROM items").fetchall()
+        for row in rows:
+            payload = json.loads(row["payload"])
+            water = payload.get("water_supply") or {}
+            for order in water.get("orders", []):
+                if order.get("source_id") != source_id:
+                    continue
+                for line in order.get("lines", []):
+                    if line.get("status") in {"reserved", "partial", "partially_delivered"}:
+                        available -= float(line.get("reserved_volume", 0)) - float(line.get("delivered_volume", 0))
+        return round(available, 6)
+
+    def source_dispatch_action(self, item_id, action, payload, actor, role, expected_version=None):
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("item_not_found", "业务实体不存在")
+            if expected_version is not None and int(expected_version) != int(row["version"]):
+                raise ConflictError("version_conflict", "记录已被其他操作更新，请重新读取")
+            item = self._row_to_item(row)
+            source_id = payload.get("source_id")
+            if action == "redeliver" and not source_id:
+                water = item["payload"].get("water_supply") or {}
+                todo_id = payload.get("todo_id")
+                todo = next((item for item in water.get("todos", []) if item.get("todo_id") == todo_id), None)
+                source_id = todo.get("source_id") if todo else None
+            source = conn.execute(
+                "SELECT * FROM backup_sources WHERE source_id=?", (source_id,)
+            ).fetchone()
+            if source is None:
+                raise DomainError("backup_source_not_found", "备用水源不存在", 404)
+            source = dict(source)
+            source["available_volume"] = self._global_available_volume(
+                conn, source["source_id"], source["capacity_volume"]
+            )
+            dispatch_payload = dict(payload)
+            dispatch_payload["_backup_source"] = source
+            new_status, new_payload, event_payload = rules.apply_action(
+                item, action, dispatch_payload, actor, role
+            )
+            version = int(row["version"]) + 1
+            conn.execute(
+                "UPDATE items SET status=?,version=?,payload=?,updated_at=? WHERE id=?",
+                (new_status, version, canonical_json(new_payload), now_iso(), item_id),
+            )
+            conn.execute(
+                "INSERT INTO actions(item_id,action,actor,role,payload,created_at) VALUES(?,?,?,?,?,?)",
+                (item_id, action, actor, role, canonical_json(event_payload), now_iso()),
+            )
+            self.append_audit(conn, item_id, action, actor, role, event_payload)
+            conn.execute("COMMIT")
+            return self.get_item(item_id)
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+
     def apply_action(self, item_id, action, actor, role, new_status, new_payload, event_payload, expected_version=None):
         conn = self.connect()
         try:
@@ -256,6 +373,10 @@ class Repository:
             counts = {}
             for row in conn.execute("SELECT status, COUNT(*) AS total FROM items GROUP BY status").fetchall():
                 counts[row["status"]] = row["total"]
-            return {"counts": counts, "items": self.list_items()}
+            return {
+                "counts": counts,
+                "items": self.list_items(),
+                "backup_sources": self.list_backup_sources(),
+            }
         finally:
             conn.close()
